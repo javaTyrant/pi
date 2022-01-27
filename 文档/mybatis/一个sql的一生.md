@@ -373,14 +373,6 @@ public Object invoke(Object proxy, Method method, Object[] params) throws Throwa
 
 
 
-
-
-
-
-
-
-
-
 SqlSessionTemplate的作用.
 
 Thread safe, Spring managed, SqlSession that works with **Spring transaction** management to ensure that that the actual SqlSession used is the one associated with the current Spring transaction**. In addition, it manages the session life-cycle, including closing, committing or rolling back the session as necessary based on the Spring transaction configuration.**

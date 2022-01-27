@@ -1,5 +1,7 @@
 # DelayQueue源码阅读
 
+**思考:有更优秀的替代版本吗?**
+
 队列的元素:
 
 用于存放拥有过期时间的元素的阻塞队列.元素的过期时间如何定义?
@@ -37,11 +39,11 @@ An unbounded [blocking queue](../../../java/util/concurrent/BlockingQueue.html) 
 
 This class and its iterator implement all of the *optional* methods of the [`Collection`](../../../java/util/Collection.html) and [`Iterator`](../../../java/util/Iterator.html) interfaces. The Iterator provided in method [`iterator()`](../../../java/util/concurrent/DelayQueue.html#iterator--)is *not* guaranteed to traverse the elements of the DelayQueue in any particular order.
 
-1.什么时候过期:当这个元素的getDelay返回的值小于等于0
+1.什么时候**过期**:当这个元素的getDelay返回的值小于等于0
 
 2.对应允许空元素吗?no
 
-3.未过期的元素可以take或者poll吗?no
+3.**未过期**的元素可以take或者poll吗?no
 
 4.head of the queue:无过期元素为null,有已过期的元素才有head
 
@@ -64,113 +66,115 @@ Delayed extends Comparable<Delayed>
 ## 核心变量
 
 ```java
-//等待,通知
-private final Condition available = lock.newCondition();
+//
+private final PriorityQueue<E> q = new PriorityQueue<E>();
 //
 private Thread leader = null;
 //
-private final transient ReentrantLock lock = new ReentrantLock();
-//内部的数据结构,PriorityQueue是线程安全的吗.可以是不安全的,因为这个类有足够的同步保证.
-private final PriorityQueue<E> q = new PriorityQueue<E>();
-内部类
- private class Itr implements Iterator<E>{}  public boolean offer(E e) {
-        final ReentrantLock lock = this.lock;
-        lock.lock();
-        try {
-            q.offer(e);
-            if (q.peek() == e) {
-                leader = null;
-                available.signal();
-            }
-            return true;
-        } finally {
-            lock.unlock();
-        }
+private final Condition available = lock.newCondition();
+```
+
+## 核心方法
+
+**poll和take的区别**
+
+还有个带timeout的poll.
+
+```java
+public E poll() {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        //什么时候put呢?
+        E first = q.peek();
+        //为空或者没有过期
+        if (first == null || first.getDelay(NANOSECONDS) > 0)
+            return null;
+        else
+            //直接poll
+            return q.poll();
+    } finally {
+        lock.unlock();
     }
-	//
-  public boolean offer(E e) {
-    		//先获取到锁
-        final ReentrantLock lock = this.lock;
-    		//上锁
-        lock.lock();
-        try {
-          	//优先队列添加
-            q.offer(e);
-          	//二次确认,如果不等呢
-            if (q.peek() == e) {
-                leader = null;
-                available.signal();
-            }
-            return true;
-        } finally {
-            lock.unlock();
-        }
-    }
-	 //Retrieves and removes the head of this queue, waiting if necessary
-   //until an element with an expired delay is available on this queue.
-	 //取出队列头,必要时等待直到一个元素过期了.
-	 public E take() throws InterruptedException {
-     		//先获取锁
-        final ReentrantLock lock = this.lock;
-     		//锁起来
-        lock.lockInterruptibly();
-        try {
-          	//死循环
-            for (;;) {
-              	//取一个
-                E first = q.peek();
-              	//如果first等于null,等待通知,有哪些通知点
-                if (first == null)
+}
+```
+
+**take的逻辑**
+
+```java
+public E take() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
+    try {
+        //死循环
+        for (;;) {
+            E first = q.peek();
+            //如果为空,就等.等说明了什么呢?说明队列没有元素,等生成者生产.
+            if (first == null)
+                available.await();
+            else {
+                //否则获取delay
+                long delay = first.getDelay(NANOSECONDS);
+                //过期时间到了
+                if (delay <= 0)
+                    return q.poll();
+                //
+                first = null; // don't retain ref while waiting
+                //leader不为空等待
+                if (leader != null)
                     available.await();
-                else {//first不会空,获取过期时间
-                    long delay = first.getDelay(NANOSECONDS);
-                  	//小于0,返回
-                    if (delay <= 0)
-                        return q.poll();
-                  	//don't retain ref while waiting
-                  	//赋值为空
-                    first = null;
-                  	//leader不为空,等待,说明有其他线程已经在等待取元素了
-                    if (leader != null)
-                        available.await();
-                    else {
-                      	//获取当前线程
-                        Thread thisThread = Thread.currentThread();
-                        leader = thisThread;
-                        try {
-                          	//等待过期时间
-                            available.awaitNanos(delay);
-                        } finally {
-                          	//如果leader==thisThread,leader赋值为空
-                            if (leader == thisThread)
-                                leader = null;
-                        }
+                else {//leader为空
+                    Thread thisThread = Thread.currentThread();
+                    leader = thisThread;
+                    try {
+                        //等待delay的时间.
+                        available.awaitNanos(delay);
+                    } finally {
+                        //如果leader是当前的线程,leader置空.
+                        if (leader == thisThread)
+                            leader = null;
                     }
                 }
             }
-        } finally {
-          	//如果leader为空且头元素有值,发通知
-            if (leader == null && q.peek() != null)
-                available.signal();
-          	//解锁
-            lock.unlock();
         }
-    //为什么poll不用判断leader呢?poll和take的区别
-    //poll如果队列是空的话,是不用等待的,所以就不会有其他的线程在等待
-    //poll是Queue的方法,take是BlockingQueue的方法,显而易见了吧.
-    public E poll() {
-        final ReentrantLock lock = this.lock;
-        lock.lock();
-        try {
-            E first = q.peek();
-            if (first == null || first.getDelay(NANOSECONDS) > 0)
-                return null;
-            else
-                return q.poll();
-        } finally {
-            lock.unlock();
-        }
+    } finally {
+        //什么时候通知.leader为空了,且队列头有值.
+        if (leader == null && q.peek() != null)
+            //通知.谁呢?
+            available.signal();
+        lock.unlock();
     }
+}
+```
+
+
+
+```java
+public boolean offer(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        //放入队列
+        q.offer(e);
+        //如果相等?什么时候会不等呢?
+        //如果放入的就是最快过期的
+        if (q.peek() == e) {
+            //
+            leader = null;
+            //t通知.
+            available.signal();
+        }
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+
+
+```java
+
 ```
 
 ## 扩展:Follower Leader 模式
